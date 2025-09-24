@@ -28,6 +28,8 @@ fn main() {
         Err(e) => panic!("エラー: {}", e),
     };
 
+    println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
+
     // パケットデータのバッファを準備
     let mut ethernet_buffer = [0u8; 42];
     let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
