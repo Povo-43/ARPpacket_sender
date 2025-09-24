@@ -35,7 +35,7 @@ fn main() {
     let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
 
     // イーサネットヘッダの組み立て
-    ethernet_packet.set_destination(pnet::datalink::MacAddr(0x00, 0x00, 0x00, 0x00, 0x00, 0x00)); // ARPはブロードキャスト
+    ethernet_packet.set_destination(pnet::datalink::MacAddr(0xbc, 0x24, 0x11, 0x91, 0xc9, 0xf6));
     ethernet_packet.set_source(interface.mac.unwrap());
     ethernet_packet.set_ethertype(pnet::packet::ethernet::EtherTypes::Arp);
 
@@ -67,8 +67,8 @@ fn main() {
         )
         .unwrap()
     );
-    arp_packet.set_target_hw_addr(pnet::datalink::MacAddr(0xf8, 0x0f, 0x41, 0x76, 0x91, 0xe9));//宛先のmacアドレス
-    let target_ip: Ipv4Addr = Ipv4Addr::from([192, 168, 10, 128]); //宛先のIP
+    arp_packet.set_target_hw_addr(pnet::datalink::MacAddr(0xbc, 0x24, 0x11, 0x91, 0xc9, 0xf6));//宛先のmacアドレス
+    let target_ip: Ipv4Addr = Ipv4Addr::from([192, 168, 10, 105]); //宛先のIP
     arp_packet.set_target_proto_addr(target_ip);
 
     // ARPパケットをイーサネットパケットのペイロードに格納
