@@ -3,33 +3,145 @@ use pnet::packet::arp::{ArpPacket, MutableArpPacket, ArpOperation};
 use pnet::packet::ethernet::{EthernetPacket, MutableEthernetPacket};
 use pnet::packet::{Packet, MutablePacket};
 use std::net::{Ipv4Addr, IpAddr};
-use std::env;
+use pnet::packet::ip::IpNextHeaderProtocols;
+use pnet::packet::ipv4::{self, Ipv4Packet, MutableIpv4Packet};
+use pnet::transport::{transport_channel, TransportChannelType};
+use std::time::{Duration, Instant};
+use std::thread;
+use pnet::packet::icmp::{self, IcmpTypes, echo_request, IcmpPacket, echo_reply::EchoReplyPacket};
+
 
 fn main() {
+    println!("
+    █████╗  ██████╗  ██████╗  ██████╗   █████╗   ██████╗ ██╗  ██╗
+    ██╔══██╗ ██╔══██╗ ██╔══██╗ ██╔══██╗ ██╔══██╗ ██╔════╝ ██║ ██╔╝
+    ███████║ ██████╔╝ ██████╔╝ ██████╔╝ ███████║ ██║      █████╔╝ 
+    ██╔══██║ ██╔══██╗ ██╔═══╝  ██╔═══╝  ██╔══██║ ██║      ██╔═██╗ 
+    ██║  ██║ ██║  ██║ ██║      ██║      ██║  ██║ ╚██████╗ ██║  ██╗
+    ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═╝      ╚═╝      ╚═╝  ╚═╝  ╚═════╝ ╚═╝  ╚═╝
 
+    ███████╗ ███████╗ ███╗   ██╗ ██████╗  ███████╗ ██████╗ 
+    ██╔════╝ ██╔════╝ ████╗  ██║ ██╔══██╗ ██╔════╝ ██╔══██╗
+    ███████╗ █████╗   ██╔██╗ ██║ ██║  ██║ █████╗   ██████╔╝
+    ╚════██║ ██╔══╝   ██║╚██╗██║ ██║  ██║ ██╔══╝   ██╔══██╗
+    ███████║ ███████╗ ██║ ╚████║ ██████╔╝ ███████╗ ██║  ██║
+    ╚══════╝ ╚══════╝ ╚═╝  ╚═══╝ ╚═════╝  ╚══════╝ ╚═╝  ╚═╝
+");
     println!("ARPスプーフィングを実行します。");
     println!("これは実験的な用途であり、自分の管理下のネットワークで実験的目的にのみ使用してください。");
     println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
-    // ネットワークインターフェースを取得
+    println!("⟦ ネットワークの初期化を開始 ⟧");
+    // ネットワークインターフェース
     let interface = datalink::interfaces().into_iter()
         .find(|iface: &NetworkInterface| iface.is_up() && !iface.is_loopback() && iface.is_broadcast())
         .expect("利用可能なネットワークインターフェースが見つかりませんでした");
 
-    // インターフェース名を取得
     let interface_name = &interface.name;
     println!("使用するインターフェース: {}", interface_name);
 
+    let my_ip = interface.ips
+        .iter()
+        .find_map(|ip_network| {
+            match ip_network.ip() {
+                IpAddr::V4(v4) => {
+                    let mut octets = v4.octets();
+                    //octets[3] = 1;
+                    Some(Ipv4Addr::from(octets))
+                }
+                IpAddr::V6(_) => None,
+            }
+        }
+        ).unwrap();
+        println!("IPアドレス: {}", my_ip);
+
+    println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
+    println!("⟦ ネットワークのスキャンを開始 ⟧");
+    
+    // raw IPv4 channelを作成
+    let (mut tx, mut rx) = transport_channel(
+        1024,
+        TransportChannelType::Layer3(IpNextHeaderProtocols::Icmp)
+    ).unwrap();
+
+    println!("(pingを送信中...)");
+    // 送信スレッドをスポーン
+    let sender_handle = thread::spawn(move || {
+        for i in 1..255 {
+            let target_ip = Ipv4Addr::new(192, 168, my_ip.octets()[2], i);
+            let mut ipv4_buffer = [0u8; 40];
+            let mut icmp_buffer = [0u8; 8];
+
+            // ICMP Echo Requestパケットを組み立てる
+            let mut icmp_packet = icmp::echo_request::MutableEchoRequestPacket::new(&mut icmp_buffer).unwrap();
+            icmp_packet.set_icmp_type(IcmpTypes::EchoRequest);
+            icmp_packet.set_identifier(1);
+            icmp_packet.set_sequence_number(i as u16);
+
+            // チェックサム計算
+            let checksum = icmp::checksum(&IcmpPacket::new(icmp_packet.packet()).unwrap());
+            icmp_packet.set_checksum(checksum);
+
+            // IPv4パケットを組み立てる
+            let mut ipv4_packet = MutableIpv4Packet::new(&mut ipv4_buffer).unwrap();
+            ipv4_packet.set_version(4);
+            ipv4_packet.set_header_length(5);
+            ipv4_packet.set_total_length(40);
+            ipv4_packet.set_ttl(64);
+            ipv4_packet.set_next_level_protocol(IpNextHeaderProtocols::Icmp);
+            ipv4_packet.set_source(my_ip);
+            ipv4_packet.set_destination(target_ip);
+            ipv4_packet.set_payload(icmp_packet.packet_mut());
+
+            // パケット送信
+            if let Err(e) = tx.send_to(ipv4_packet.to_immutable(), IpAddr::V4(target_ip)) {
+                eprintln!("{}へのping送信に失敗: {}", target_ip, e);
+            }
+
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+    
+    println!("(pingの応答を待機中...)");
+
+    // ICMPパケットのイテレータを作成
+let mut iter = pnet::transport::icmp_packet_iter(&mut rx);
+
+loop {
+    let start_time = Instant::now();
+
+    match iter.next() {
+        Ok((packet, addr)) => {
+            let rtt = start_time.elapsed();
+
+            if packet.get_icmp_type() == IcmpTypes::EchoReply {
+                println!("IPアドレス: {} から応答あり。RTT: {:?}", addr, rtt);
+            }
+        }
+        Err(e) => {
+            eprintln!("パケット受信エラー: {}", e);
+            break;
+        }
+    }
+}
+
+
+
+    // スレッドを待つ
+    sender_handle.join().unwrap();
+
+    println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
+    println!("⟦ ARPスプーフィングを開始 ⟧");
     // 生のソケットを作成
     let mut config = datalink::Config::default();
     config.read_timeout = Some(std::time::Duration::from_secs(1));
-    let (mut tx, mut rx) = match datalink::channel(&interface, config) {
+    let (mut tx, mut _rx) = match datalink::channel(&interface, config) {
         Ok(datalink::Channel::Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => panic!("Raw Ethernet channelの作成に失敗しました。"),
         Err(e) => panic!("エラー: {}", e),
     };
 
-    println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
-
+    
+    
     // パケットデータのバッファを準備
     let mut ethernet_buffer = [0u8; 42];
     let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
