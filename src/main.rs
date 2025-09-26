@@ -1,16 +1,16 @@
-use std::io::{self, Write};
-use pnet::datalink::{self, NetworkInterface};
 use pnet::packet::arp::{ArpPacket, MutableArpPacket, ArpOperation};
-use pnet::packet::ethernet::{EthernetPacket, MutableEthernetPacket};
+use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::packet::{Packet, MutablePacket};
-use std::net::{Ipv4Addr, IpAddr};
 use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::packet::ipv4::{self, Ipv4Packet, MutableIpv4Packet};
+use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
+use pnet::packet::icmp::{self, IcmpTypes, echo_request, IcmpPacket, echo_reply::EchoReplyPacket};
 use pnet::transport::{transport_channel, TransportChannelType};
+use pnet::datalink::{self, NetworkInterface};
 use std::time::{Duration, Instant};
 use std::thread;
-use pnet::packet::icmp::{self, IcmpTypes, echo_request, IcmpPacket, echo_reply::EchoReplyPacket};
-
+use std::io::ErrorKind;
+use std::net::{Ipv4Addr, IpAddr};
+use std::io::{self};
 
 fn main() {
     println!("\x1b[92m
@@ -68,14 +68,14 @@ fn main() {
     println!("⟦ ネットワークのスキャンを開始 ⟧");
     
     // raw IPv4 channelを作成
-    let (mut tx, mut rx) = transport_channel(
+    let (mut tx, mut _rx) = transport_channel(
         1024,
         TransportChannelType::Layer3(IpNextHeaderProtocols::Icmp)
     ).unwrap();
 
     println!("(pingを送信中...)");
     // 送信スレッドをスポーン
-    let sender_handle = thread::spawn(move || {
+    let _sender_handle = thread::spawn(move || {
         for i in 1..255 {
             let target_ip = Ipv4Addr::new(192, 168, my_ip.octets()[2], i);
             let mut ipv4_buffer = [0u8; 40];
@@ -111,33 +111,71 @@ fn main() {
         }
     });
     
+    println!("(ping送信完了)");
     println!("(pingの応答を待機中...)");
 
-    // ICMPパケットのイテレータを作成
-let mut iter = pnet::transport::icmp_packet_iter(&mut rx);
+    let mut config = datalink::Config::default();
+    config.read_timeout = Some(Duration::from_secs(1));
 
-loop {
-    let start_time = Instant::now();
-
-    match iter.next() {
-        Ok((packet, addr)) => {
-            let rtt = start_time.elapsed();
-
-            if packet.get_icmp_type() == IcmpTypes::EchoReply {
-                println!("IPアドレス: {} から応答あり。RTT: {:?}", addr, rtt);
-            }
-        }
-        Err(e) => {
-            eprintln!("パケット受信エラー: {}", e);
+    let (_tx_dummy, mut datalink_rx) = match datalink::channel(&interface, config) {
+        Ok(datalink::Channel::Ethernet(tx, rx)) => (tx, rx),
+        Ok(_) => panic!("非対応の datalink チャネルです。"),
+        Err(e) => panic!("datalinkチャンネルのエラー: {}", e),
+    };
+    
+    //タイムアウト用の時刻保持
+    let start = Instant::now();
+    let timeout = Duration::from_secs(10);
+    
+    loop {
+        // タイムアウト。永遠に待ち続けない
+        if start.elapsed() >= timeout {
+            println!("{}秒たったので受信を締め切ります", timeout.as_secs());
             break;
         }
+
+        match datalink_rx.next() {
+            Ok(frame) => {
+                if let Some(eth) = EthernetPacket::new(frame) {
+                    match eth.get_ethertype() {
+                        EtherTypes::Ipv4 => {
+                            if let Some(ipv4) = Ipv4Packet::new(eth.payload()) {
+                                if ipv4.get_next_level_protocol() == IpNextHeaderProtocols::Icmp {
+                                    if let Some(icmp) = IcmpPacket::new(ipv4.payload()) {
+                                        let src = ipv4.get_source();
+                                        let icmp_t = icmp.get_icmp_type();
+                                        
+                                        // Echo Reply を検出したら詳細を表示
+                                        if icmp_t == IcmpTypes::EchoReply {
+                                            let payload = icmp.packet();
+                                            if payload.len() >= 8 {
+                                                let id = u16::from_be_bytes([payload[4], payload[5]]);
+                                                let seq = u16::from_be_bytes([payload[6], payload[7]]);
+                                                println!("[Pingへの応答] from: {}", src);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => { /* pong以外無視 */ }
+                    }
+                }
+            }
+            Err(e) => {
+                if e.kind() == ErrorKind::TimedOut {
+                    // 少し待ってから継続（busy loop 対策）
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                } else {
+                    // 想定外のエラーはログ出して終了
+                    eprintln!("Pongの受信処理でエラーが発生しました: {:?}", e);
+                    break;
+                }
+            }
+        }
     }
-}
 
-
-
-    // スレッドを待つ
-    sender_handle.join().unwrap();
 
     println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
     println!("⟦ ARPスプーフィングを開始 ⟧");
