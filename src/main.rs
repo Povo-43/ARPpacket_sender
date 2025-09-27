@@ -238,6 +238,78 @@ fn main() {
         thread::sleep(Duration::from_millis(50));
     }
 
+        println!("\n(ARPリクエスト送信完了)");
+    println!("(ARPリプライを待機中...)");
+    
+    // ---------------------------------------------------------------------------------
+    // 🚨 追記部分: ARPリプライの受信
+    // ---------------------------------------------------------------------------------
+
+    // pingが通ったIPアドレスと、見つかったMACアドレスのペアを保持するマップ
+    let mut arp_cache: HashMap<Ipv4Addr, MacAddr> = HashMap::new(); 
+    
+    // ARPリプライ受信用のタイムアウト設定
+    let start_arp_wait = Instant::now();
+    let timeout_arp_wait = Duration::from_secs(5); // 5秒間待機
+
+    // 受信機はARPリクエスト送信時に作成された `rx_datalink` を使用します。
+    // datalink::channelのConfigを再利用
+    let mut config_arp_recv = datalink::Config::default();
+    config_arp_recv.read_timeout = Some(Duration::from_millis(100)); // ループタイムアウトを短めに
+
+    // ARPリクエスト送信で使用した datalink::channel の受信側（rx_datalink）を再利用
+    let (_, mut rx_datalink_recv) = match datalink::channel(&interface, config_arp_recv) {
+        Ok(datalink::Channel::Ethernet(_, rx)) => (_tx, rx),
+        Ok(_) => panic!("ARPリプライ受信用の datalink チャネルが非対応です。"),
+        Err(e) => panic!("ARPリプライ受信 datalinkチャンネルのエラー: {}", e),
+    };
+
+    while arp_cache.len() < arrow_ping_ips.len() && start_arp_wait.elapsed() < timeout_arp_wait {
+        match rx_datalink_recv.next() {
+            Ok(frame) => {
+                if let Some(eth) = EthernetPacket::new(frame) {
+                    // EtherTypeがARPであることを確認 (0x0806)
+                    if eth.get_ethertype() == EtherTypes::Arp {
+                        if let Some(arp) = ArpPacket::new(eth.payload()) {
+                            // ARPオペレーションがリプライ(2)であることを確認
+                            if arp.get_operation() == ArpOperation::new(2) {
+                                let sender_ip = arp.get_sender_proto_addr();
+                                let sender_mac = arp.get_sender_hw_addr();
+
+                                // 自分が問い合わせたIPアドレスからのリプライであり、
+                                // かつ、まだMACアドレスを記録していない場合のみ処理
+                                if arrow_ping_ips.contains(&sender_ip) && !arp_cache.contains_key(&sender_ip) {
+                                    arp_cache.insert(sender_ip, sender_mac);
+                                    println!("[ARP応答] IP: {} は MAC: {} です。", sender_ip, sender_mac);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if e.kind() == ErrorKind::TimedOut {
+                    continue;
+                } else {
+                    eprintln!("ARPの受信処理でエラーが発生しました: {:?}", e);
+                    break;
+                }
+            }
+        }
+    }
+    
+    println!("{}秒たったのでARP受信を締め切ります。", timeout_arp_wait.as_secs());
+    
+    println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
+    println!("⟦ ARPキャッシュの結果 ⟧");
+    if arp_cache.is_empty() {
+        println!("MACアドレスが見つかったデバイスはありませんでした。");
+    } else {
+        for (ip, mac) in &arp_cache {
+            println!("- IP: {} -> MAC: {}", ip, mac);
+        }
+    }
+
     println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
     println!("⟦ ARPスプーフィングを開始 ⟧");
     // 生のソケットを作成
