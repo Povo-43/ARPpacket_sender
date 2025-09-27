@@ -6,6 +6,7 @@ use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
 use pnet::packet::icmp::{self, IcmpTypes, echo_request, IcmpPacket, echo_reply::EchoReplyPacket};
 use pnet::transport::{transport_channel, TransportChannelType};
 use pnet::datalink::{self, NetworkInterface};
+use pnet::util::MacAddr;
 use std::time::{Duration, Instant};
 use std::thread;
 use std::io::ErrorKind;
@@ -40,6 +41,9 @@ fn main() {
 
     println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
     println!("⟦ ネットワークの初期化を開始 ⟧");
+
+    //pingが通ったipを保持する配列
+    let mut arrow_ping_ips: Vec<Ipv4Addr> = Vec::new();
 
     // ネットワークインターフェースの初期化
     let interface = datalink::interfaces().into_iter()
@@ -149,8 +153,7 @@ fn main() {
                                         if icmp_t == IcmpTypes::EchoReply {
                                             let payload = icmp.packet();
                                             if payload.len() >= 8 {
-                                                let id = u16::from_be_bytes([payload[4], payload[5]]);
-                                                let seq = u16::from_be_bytes([payload[6], payload[7]]);
+                                                arrow_ping_ips.push(src);
                                                 println!("[Pingへの応答] from: {}", src);
                                             }
                                         }
@@ -176,6 +179,64 @@ fn main() {
         }
     }
 
+    println!("{}個のIPアドレスが応答しました", arrow_ping_ips.len());
+
+    println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
+    println!("⟦ ARPリクエストを送信 ⟧");
+    
+    // Datalink層の送信機（tx）と受信機（rx）を新しく作成
+    let (mut tx_datalink, mut _rx_datalink) = match datalink::channel(&interface, datalink::Config::default()) {
+        Ok(datalink::Channel::Ethernet(tx, rx)) => (tx, rx),
+        Ok(_) => panic!("ARPリクエスト用のRaw Ethernet channelの作成に失敗しました。"),
+        Err(e) => panic!("datalinkチャンネルのエラー: {}", e),
+    };
+
+    // ループ内で再利用するパケットバッファを準備
+    let mut ethernet_buffer = [0u8; 42]; // Ethernetヘッダ14バイト + ARPヘッダ28バイト
+    let mut arp_buffer = [0u8; 28]; // ARPパケットの最小サイズ
+
+    // 自分のMACアドレスを取得
+    let my_mac = interface.mac.expect("インターフェースにMACアドレスがありません");
+    let my_ipv4_addr = my_ip; // 既に取得済みの自分のIPアドレス
+
+    for target_ip in arrow_ping_ips.iter() {
+        // ターゲットIPの表示
+        println!("  ARPリクエスト送信先: {} ... ", target_ip);
+        
+        // 1. イーサネットヘッダの組み立て
+        let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
+        
+        // ARPリクエストはブロードキャスト（宛先MACアドレス：FF:FF:FF:FF:FF:FF）
+        ethernet_packet.set_destination(MacAddr::broadcast());
+        ethernet_packet.set_source(my_mac);
+        ethernet_packet.set_ethertype(EtherTypes::Arp);
+
+        // 2. ARPパケットの組み立て
+        let mut arp_packet = MutableArpPacket::new(&mut arp_buffer).unwrap();
+        
+        arp_packet.set_hardware_type(pnet::packet::arp::ArpHardwareType::new(1));
+        arp_packet.set_protocol_type(EtherTypes::Ipv4);
+        arp_packet.set_hw_addr_len(6);
+        arp_packet.set_proto_addr_len(4);
+        arp_packet.set_operation(ArpOperation::new(1)); // オペレーション: ARP Request (1)
+        
+        // 送信元情報（自分自身）
+        arp_packet.set_sender_hw_addr(my_mac);
+        arp_packet.set_sender_proto_addr(my_ipv4_addr);
+        
+        // 宛先情報
+        arp_packet.set_target_hw_addr(MacAddr::zero()); // MACアドレスは不明なので0を設定
+        arp_packet.set_target_proto_addr(*target_ip);   // 問い合わせたいIPアドレス
+        
+        // 3. ARPパケットをイーサネットパケットのペイロードに格納
+        ethernet_packet.set_payload(arp_packet.packet_mut());
+
+        // 4. パケットを送信
+        tx_datalink.send_to(ethernet_packet.packet(), None).unwrap();
+
+        // 連続送信を避けるため、少し待機
+        thread::sleep(Duration::from_millis(50));
+    }
 
     println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
     println!("⟦ ARPスプーフィングを開始 ⟧");
