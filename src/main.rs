@@ -7,11 +7,14 @@ use pnet::packet::icmp::{self, IcmpTypes, echo_request, IcmpPacket, echo_reply::
 use pnet::transport::{transport_channel, TransportChannelType};
 use pnet::datalink::{self, NetworkInterface};
 use pnet::util::MacAddr;
+use std::net::{Ipv4Addr, IpAddr};
 use std::time::{Duration, Instant};
 use std::thread;
 use std::io::ErrorKind;
-use std::net::{Ipv4Addr, IpAddr};
 use std::io::{self};
+use std::str::FromStr;
+use std::process::Command;
+use std::collections::HashMap;
 
 fn main() {
     println!("\x1b[92m
@@ -134,7 +137,6 @@ fn main() {
     loop {
         // タイムアウト。永遠に待ち続けない
         if start.elapsed() >= timeout {
-            println!("{}秒たったので受信を締め切ります", timeout.as_secs());
             break;
         }
 
@@ -154,7 +156,7 @@ fn main() {
                                             let payload = icmp.packet();
                                             if payload.len() >= 8 {
                                                 arrow_ping_ips.push(src);
-                                                println!("[Pingへの応答] from: {}", src);
+                                                println!("  [Pingへの応答] from: {}", src);
                                             }
                                         }
                                     }
@@ -201,7 +203,7 @@ fn main() {
 
     for target_ip in arrow_ping_ips.iter() {
         // ターゲットIPの表示
-        println!("  ARPリクエスト送信先: {} ... ", target_ip);
+        println!("  [ARPリクエスト送信先] {} ... ", target_ip);
         
         // 1. イーサネットヘッダの組み立て
         let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
@@ -232,82 +234,39 @@ fn main() {
         ethernet_packet.set_payload(arp_packet.packet_mut());
 
         // 4. パケットを送信
-        tx_datalink.send_to(ethernet_packet.packet(), None).unwrap();
+        let _ = tx_datalink.send_to(ethernet_packet.packet(), None).unwrap();
 
         // 連続送信を避けるため、少し待機
         thread::sleep(Duration::from_millis(50));
     }
 
-        println!("\n(ARPリクエスト送信完了)");
-    println!("(ARPリプライを待機中...)");
-    
-    // ---------------------------------------------------------------------------------
-    // 🚨 追記部分: ARPリプライの受信
-    // ---------------------------------------------------------------------------------
+    println!("(ARPリクエスト送信完了)");
 
     // pingが通ったIPアドレスと、見つかったMACアドレスのペアを保持するマップ
-    let mut arp_cache: HashMap<Ipv4Addr, MacAddr> = HashMap::new(); 
-    
-    // ARPリプライ受信用のタイムアウト設定
-    let start_arp_wait = Instant::now();
-    let timeout_arp_wait = Duration::from_secs(5); // 5秒間待機
+    let mut arp_cache: HashMap<Ipv4Addr, MacAddr> = HashMap::new();
 
-    // 受信機はARPリクエスト送信時に作成された `rx_datalink` を使用します。
-    // datalink::channelのConfigを再利用
-    let mut config_arp_recv = datalink::Config::default();
-    config_arp_recv.read_timeout = Some(Duration::from_millis(100)); // ループタイムアウトを短めに
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("ip").arg("neigh").arg("show").output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // ARPリクエスト送信で使用した datalink::channel の受信側（rx_datalink）を再利用
-    let (_, mut rx_datalink_recv) = match datalink::channel(&interface, config_arp_recv) {
-        Ok(datalink::Channel::Ethernet(_, rx)) => (_tx, rx),
-        Ok(_) => panic!("ARPリプライ受信用の datalink チャネルが非対応です。"),
-        Err(e) => panic!("ARPリプライ受信 datalinkチャンネルのエラー: {}", e),
-    };
-
-    while arp_cache.len() < arrow_ping_ips.len() && start_arp_wait.elapsed() < timeout_arp_wait {
-        match rx_datalink_recv.next() {
-            Ok(frame) => {
-                if let Some(eth) = EthernetPacket::new(frame) {
-                    // EtherTypeがARPであることを確認 (0x0806)
-                    if eth.get_ethertype() == EtherTypes::Arp {
-                        if let Some(arp) = ArpPacket::new(eth.payload()) {
-                            // ARPオペレーションがリプライ(2)であることを確認
-                            if arp.get_operation() == ArpOperation::new(2) {
-                                let sender_ip = arp.get_sender_proto_addr();
-                                let sender_mac = arp.get_sender_hw_addr();
-
-                                // 自分が問い合わせたIPアドレスからのリプライであり、
-                                // かつ、まだMACアドレスを記録していない場合のみ処理
-                                if arrow_ping_ips.contains(&sender_ip) && !arp_cache.contains_key(&sender_ip) {
-                                    arp_cache.insert(sender_ip, sender_mac);
-                                    println!("[ARP応答] IP: {} は MAC: {} です。", sender_ip, sender_mac);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                if e.kind() == ErrorKind::TimedOut {
-                    continue;
-                } else {
-                    eprintln!("ARPの受信処理でエラーが発生しました: {:?}", e);
-                    break;
+        for line in stdout.lines() {
+            // 例: "192.168.10.1 dev enp0s25 lladdr 34:12:98:xx:xx:xx REACHABLE"
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 5 && parts[3] == "lladdr" {
+                if let (Ok(ip), Ok(mac)) = (
+                    Ipv4Addr::from_str(parts[0]),
+                    MacAddr::from_str(parts[4]),
+                ) {
+                    arp_cache.insert(ip, mac);
                 }
             }
         }
     }
-    
-    println!("{}秒たったのでARP受信を締め切ります。", timeout_arp_wait.as_secs());
-    
-    println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
-    println!("⟦ ARPキャッシュの結果 ⟧");
-    if arp_cache.is_empty() {
-        println!("MACアドレスが見つかったデバイスはありませんでした。");
-    } else {
-        for (ip, mac) in &arp_cache {
-            println!("- IP: {} -> MAC: {}", ip, mac);
-        }
+
+    // 出力確認
+    for (ip, mac) in &arp_cache {
+        println!("  [ARPキャッシュテーブル]{} : {}", ip, mac);
     }
 
     println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
@@ -321,14 +280,19 @@ fn main() {
         Err(e) => panic!("エラー: {}", e),
     };
 
-    
-    
+    for (ip, mac) in &arp_cache {
+        arp_send(&mut tx, interface.clone(), *mac, *ip);
+    }
+}
+
+// 利便性のために分けた
+fn arp_send(tx: &mut Box<dyn datalink::DataLinkSender>, interface: NetworkInterface, mac: MacAddr, ip: Ipv4Addr){
     // パケットデータのバッファを準備
     let mut ethernet_buffer = [0u8; 42];
     let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
 
     // イーサネットヘッダの組み立て
-    ethernet_packet.set_destination(pnet::datalink::MacAddr(0xbc, 0x24, 0x11, 0x91, 0xc9, 0xf6));
+    ethernet_packet.set_destination(mac);
     ethernet_packet.set_source(interface.mac.unwrap());
     ethernet_packet.set_ethertype(pnet::packet::ethernet::EtherTypes::Arp);
 
@@ -341,7 +305,7 @@ fn main() {
     arp_packet.set_protocol_type(pnet::packet::ethernet::EtherTypes::Ipv4);
     arp_packet.set_hw_addr_len(6);
     arp_packet.set_proto_addr_len(4);
-    arp_packet.set_operation(ArpOperation::new(2)); // リクエスト 1, アンサー 2
+    arp_packet.set_operation(ArpOperation::new(2));
     arp_packet.set_sender_hw_addr(interface.mac.unwrap());
     arp_packet.set_sender_proto_addr(
     interface.ips
@@ -360,8 +324,8 @@ fn main() {
         )
         .unwrap()
     );
-    arp_packet.set_target_hw_addr(pnet::datalink::MacAddr(0xbc, 0x24, 0x11, 0x91, 0xc9, 0xf6));//宛先のmacアドレス
-    let target_ip: Ipv4Addr = Ipv4Addr::from([192, 168, 10, 105]); //宛先のIP
+    arp_packet.set_target_hw_addr(mac);//宛先のmacアドレス
+    let target_ip: Ipv4Addr = ip; //宛先のIP
     arp_packet.set_target_proto_addr(target_ip);
 
     // ARPパケットをイーサネットパケットのペイロードに格納
