@@ -222,12 +222,12 @@ fn main() {
         arp_packet.set_proto_addr_len(4);
         arp_packet.set_operation(ArpOperation::new(1)); // オペレーション: ARP Request (1)
         
-        // 送信元情報（自分自身）
+        // 送信元情報
         arp_packet.set_sender_hw_addr(my_mac);
         arp_packet.set_sender_proto_addr(my_ipv4_addr);
         
         // 宛先情報
-        arp_packet.set_target_hw_addr(MacAddr::zero()); // MACアドレスは不明なので0を設定
+        arp_packet.set_target_hw_addr(MacAddr::zero());
         arp_packet.set_target_proto_addr(*target_ip);   // 問い合わせたいIPアドレス
         
         // 3. ARPパケットをイーサネットパケットのペイロードに格納
