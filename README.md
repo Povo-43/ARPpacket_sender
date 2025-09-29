@@ -33,9 +33,14 @@
 pnetクレートを扱うため、基本的に root 権限で実行します。
 
 ```bash
+git clone https://github.com/Povo-43/ARPpacket_sender.git
+
+cd ARPpacket_sender
+```
+
+```bash
 sudo su
 ```
-実行します。
 ```bash
 cargo run
 ```
