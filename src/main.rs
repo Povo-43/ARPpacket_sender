@@ -84,7 +84,7 @@ fn main() {
     // 送信スレッドをスポーン
     let _sender_handle = thread::spawn(move || {
         for i in 1..255 {
-            let target_ip = Ipv4Addr::new(192, 168, my_ip.octets()[2], i);
+            let target_ip = Ipv4Addr::new(my_ip.octets()[0], my_ip.octets()[1], my_ip.octets()[2], i);
             let mut ipv4_buffer = [0u8; 40];
             let mut icmp_buffer = [0u8; 8];
 
@@ -283,6 +283,9 @@ fn main() {
     for (ip, mac) in &arp_cache {
         arp_send(&mut tx, interface.clone(), *mac, *ip);
     }
+
+    println!("ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー");
+    println!("⟦ ＞＞＞すべての工程が終了しました＜＜＜ ⟧");
 }
 
 // 利便性のために分けた
